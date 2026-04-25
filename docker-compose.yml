@@ -1,0 +1,63 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: lahzo-postgres
+    environment:
+      POSTGRES_USER: lahzo
+      POSTGRES_PASSWORD: lahzo
+      POSTGRES_DB: lahzo
+    ports:
+      - '5432:5432'
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U lahzo']
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: lahzo-redis
+    ports:
+      - '6379:6379'
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  server:
+    build: ./server
+    container_name: lahzo-server
+    ports:
+      - '3000:3000'
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://lahzo:lahzo@postgres:5432/lahzo
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    profiles:
+      - full
+
+  client:
+    build: ./client
+    container_name: lahzo-client
+    ports:
+      - '8080:80'
+    depends_on:
+      - server
+    profiles:
+      - full
+
+volumes:
+  pgdata:
+  redisdata:
