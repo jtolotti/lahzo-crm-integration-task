@@ -99,9 +99,11 @@ Copy the HTTPS URL and configure it as your HubSpot webhook target:
 
 | Variable | Description | Example |
 |---|---|---|
-| `HUBSPOT_ACCESS_TOKEN` | Private app access token | `pat-na1-xxxx` |
-| `HUBSPOT_CLIENT_SECRET` | Private app client secret (for signature verification) | `xxxx-xxxx-xxxx` |
+| `HUBSPOT_ACCESS_TOKEN` | Private app access token (CRM API calls) | `pat-na1-xxxx` |
+| `HUBSPOT_CLIENT_SECRET` | Legacy app client secret (webhook signature verification) | `xxxx-xxxx-xxxx` |
 | `HUBSPOT_PORTAL_ID` | HubSpot portal/account ID | `51387961` |
+| `HUBSPOT_APP_ID` | Legacy app ID (webhook subscriptions) | `12345678` |
+| `HUBSPOT_CLIENT_ID` | Legacy app client ID (OAuth install) | `xxxx-xxxx-xxxx` |
 | `DATABASE_URL` | PostgreSQL connection string | `postgresql://lahzo:lahzo@localhost:5432/lahzo` |
 | `REDIS_URL` | Redis connection string | `redis://localhost:6379` |
 | `JWT_SECRET` | Secret for signing JWT tokens | (any strong random string) |
@@ -150,6 +152,7 @@ RBAC was not part of the original task requirements. I implemented it as a produ
 | `GET` | `/api/contacts` | List contacts (paginated, filterable by status) |
 | `GET` | `/api/contacts/:id` | Contact detail + sync events |
 | `GET` | `/api/contacts/stats/summary` | Status counts |
+| `POST` | `/api/contacts/:id/resync` | Re-trigger full sync for a contact |
 | `GET` | `/api/sync-events/failures` | Recent failed events |
 | `POST` | `/api/sync-events/:id/retry` | Re-queue a failed event |
 

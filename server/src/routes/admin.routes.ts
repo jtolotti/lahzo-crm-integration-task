@@ -11,13 +11,15 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
    * GET /admin/webhooks — Paginated list of raw webhook payloads.
    */
   app.get('/admin/webhooks', async (request, reply) => {
-    const { page = '1', limit = '20' } = request.query as Record<string, string>;
-    const result = await rawWebhookRepo.findAll(parseInt(page, 10), parseInt(limit, 10));
+    const { page: rawPage = '1', limit: rawLimit = '20' } = request.query as Record<string, string>;
+    const page = Math.max(1, parseInt(rawPage, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(rawLimit, 10) || 20));
+    const result = await rawWebhookRepo.findAll(page, limit);
     return reply.send({
       data: result.data,
       total: result.total,
-      page: parseInt(page, 10),
-      limit: parseInt(limit, 10),
+      page,
+      limit,
     });
   });
 

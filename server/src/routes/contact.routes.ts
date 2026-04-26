@@ -14,23 +14,22 @@ export async function contactRoutes(app: FastifyInstance): Promise<void> {
    * GET /contacts — List contacts with pagination and optional status filter.
    */
   app.get('/contacts', async (request, reply) => {
-    const { page = '1', limit = '20', status } = request.query as Record<string, string>;
+    const { page: rawPage = '1', limit: rawLimit = '20', status } = request.query as Record<string, string>;
+
+    const page = Math.max(1, parseInt(rawPage, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(rawLimit, 10) || 20));
 
     const statusFilter = status && Object.values(SyncStatus).includes(status as SyncStatus)
       ? (status as SyncStatus)
       : undefined;
 
-    const result = await contactService.getContacts(
-      parseInt(page, 10),
-      parseInt(limit, 10),
-      statusFilter,
-    );
+    const result = await contactService.getContacts(page, limit, statusFilter);
 
     return reply.send({
       data: result.data,
       total: result.total,
-      page: parseInt(page, 10),
-      limit: parseInt(limit, 10),
+      page,
+      limit,
     });
   });
 

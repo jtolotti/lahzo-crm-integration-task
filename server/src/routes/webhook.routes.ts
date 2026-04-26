@@ -32,6 +32,7 @@ export async function webhookRoutes(app: FastifyInstance): Promise<void> {
         status: 'accepted',
         accepted: result.accepted,
         duplicates: result.duplicates,
+        errors: result.errors,
       });
     },
   });

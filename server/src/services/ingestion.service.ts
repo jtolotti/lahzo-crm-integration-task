@@ -19,7 +19,7 @@ import { logger } from '../utils/logger.js';
 export async function ingestWebhook(
   payload: unknown,
   headers: Record<string, unknown>,
-): Promise<{ accepted: number; duplicates: number }> {
+): Promise<{ accepted: number; duplicates: number; errors: number }> {
   const rawWebhook = await rawWebhookRepo.insertRawWebhook(payload, headers);
   logger.info({ rawWebhookId: rawWebhook.id }, 'Raw webhook persisted');
 
@@ -28,6 +28,7 @@ export async function ingestWebhook(
 
   let accepted = 0;
   let duplicates = 0;
+  let errors = 0;
 
   for (const event of events) {
     try {
@@ -38,14 +39,15 @@ export async function ingestWebhook(
         accepted++;
       }
     } catch (err) {
+      errors++;
       logger.error({ err, eventId: event.eventId }, 'Failed to process event during ingestion');
     }
   }
 
   await rawWebhookRepo.markProcessed(rawWebhook.id);
-  logger.info({ rawWebhookId: rawWebhook.id, accepted, duplicates }, 'Webhook ingestion complete');
+  logger.info({ rawWebhookId: rawWebhook.id, accepted, duplicates, errors }, 'Webhook ingestion complete');
 
-  return { accepted, duplicates };
+  return { accepted, duplicates, errors };
 }
 
 async function processEvent(

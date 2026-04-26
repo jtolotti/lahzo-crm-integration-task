@@ -178,7 +178,7 @@ export function ContactDetailPage() {
                       }`}>{ev.direction}</span>
                     </div>
                     <div className="text-xs text-slate-500 mt-0.5">
-                      {new Date(ev.occurred_at).toLocaleString()}
+                      {ev.occurred_at ? new Date(ev.occurred_at).toLocaleString() : new Date(ev.created_at).toLocaleString()}
                       {ev.error_message && <span className="text-red-400 ml-2">— {ev.error_message}</span>}
                     </div>
                   </div>

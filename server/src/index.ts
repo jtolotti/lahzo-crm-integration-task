@@ -4,6 +4,8 @@ import { config } from './config.js';
 import { logger } from './utils/logger.js';
 import { runMigrations } from './db/migrate.js';
 import { createSyncWorker } from './queue/sync.worker.js';
+import { pool } from './db/client.js';
+import { redisConnection } from './queue/connection.js';
 import { webhookRoutes } from './routes/webhook.routes.js';
 import { authRoutes } from './routes/auth.routes.js';
 import { contactRoutes } from './routes/contact.routes.js';
@@ -42,32 +44,16 @@ server.get('/health', async () => {
   return { status: 'ok', timestamp: new Date().toISOString() };
 });
 
-// Temporary OAuth callback for installing the Legacy App in the test portal.
-// After installation is confirmed, this route can be removed.
-server.get('/oauth/callback', async (request, reply) => {
-  const { code } = request.query as { code?: string };
-  if (!code) {
-    return reply.status(400).send({ error: 'Missing code parameter' });
+server.setErrorHandler((error: Error & { statusCode?: number }, _request, reply) => {
+  const statusCode = error.statusCode ?? 500;
+
+  if (statusCode >= 500) {
+    server.log.error(error, 'Unhandled server error');
   }
 
-  const tokenRes = await fetch('https://api.hubapi.com/oauth/v1/token', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      grant_type: 'authorization_code',
-      client_id: process.env['HUBSPOT_CLIENT_ID'] ?? '',
-      client_secret: config.HUBSPOT_CLIENT_SECRET,
-      redirect_uri: `${request.headers['x-forwarded-proto'] ?? 'http'}://${request.headers.host}/oauth/callback`,
-      code,
-    }),
-  });
-
-  const tokenData = await tokenRes.json();
-  logger.info({ status: tokenRes.status }, 'OAuth token exchange complete');
-  return reply.send({
-    message: 'App installed successfully! Webhooks are now active.',
-    status: tokenRes.status,
-    data: tokenData,
+  return reply.status(statusCode).send({
+    error: statusCode >= 500 ? 'Internal server error' : error.message,
+    ...(config.NODE_ENV !== 'production' && { detail: error.message }),
   });
 });
 
@@ -91,6 +77,8 @@ async function start() {
       logger.info('Shutting down...');
       await worker.close();
       await server.close();
+      await pool.end();
+      await redisConnection.quit();
       process.exit(0);
     };
 

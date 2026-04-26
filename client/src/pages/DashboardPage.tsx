@@ -33,25 +33,30 @@ export function DashboardPage() {
   const limit = 20;
 
   useEffect(() => {
-    load();
-  }, [page, statusFilter]);
+    let cancelled = false;
 
-  async function load() {
-    setLoading(true);
-    try {
-      const [contactsRes, statsRes] = await Promise.all([
-        api.getContacts(page, limit, statusFilter || undefined),
-        api.getStats(),
-      ]);
-      setContacts(contactsRes.data);
-      setTotal(contactsRes.total);
-      setStats(statsRes);
-    } catch {
-      // auth redirect handled by api client
-    } finally {
-      setLoading(false);
+    async function fetchData() {
+      setLoading(true);
+      try {
+        const [contactsRes, statsRes] = await Promise.all([
+          api.getContacts(page, limit, statusFilter || undefined),
+          api.getStats(),
+        ]);
+        if (!cancelled) {
+          setContacts(contactsRes.data);
+          setTotal(contactsRes.total);
+          setStats(statsRes);
+        }
+      } catch {
+        // auth redirect handled by api client
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
     }
-  }
+
+    fetchData();
+    return () => { cancelled = true; };
+  }, [page, statusFilter]);
 
   async function handleRefresh() {
     setRefreshing(true);
