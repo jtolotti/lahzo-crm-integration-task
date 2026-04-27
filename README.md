@@ -23,7 +23,7 @@ HubSpot CRM ──webhook──▶ Fastify Server ──persist──▶ Postgre
 - **Accept-and-queue**: Webhook handler persists raw event + enqueues job in <100ms, returns 200 within HubSpot's ~5s timeout
 - **Async processing**: BullMQ worker handles enrichment (3–15s), scoring, and CRM writeback
 - **Durability**: Raw webhooks persisted to PostgreSQL before acknowledging — no events lost
-- **Idempotency**: Two-layer dedup (PostgreSQL UNIQUE + sync event status check)
+- **Idempotency**: Three-layer dedup (ingestion query + PostgreSQL UNIQUE constraint + worker status check)
 - **Stale protection**: Timestamp-based optimistic concurrency + state machine transitions
 - **Rate limiting**: Redis sliding-window limiter (80 req/10s) + BullMQ queue-level limiter
 
@@ -101,9 +101,9 @@ Copy the HTTPS URL and configure it as your HubSpot webhook target:
 |---|---|---|
 | `HUBSPOT_ACCESS_TOKEN` | Private app access token (CRM API calls) | `pat-na1-xxxx` |
 | `HUBSPOT_CLIENT_SECRET` | Legacy app client secret (webhook signature verification) | `xxxx-xxxx-xxxx` |
-| `HUBSPOT_PORTAL_ID` | HubSpot portal/account ID | `51387961` |
-| `HUBSPOT_APP_ID` | Legacy app ID (webhook subscriptions) | `12345678` |
-| `HUBSPOT_CLIENT_ID` | Legacy app client ID (OAuth install) | `xxxx-xxxx-xxxx` |
+| `HUBSPOT_PORTAL_ID` | HubSpot portal/account ID | `12345678` |
+| `HUBSPOT_APP_ID` | Legacy app ID (reference for HubSpot webhook config) | `12345678` |
+| `HUBSPOT_CLIENT_ID` | Legacy app client ID (reference for OAuth install) | `xxxx-xxxx-xxxx` |
 | `DATABASE_URL` | PostgreSQL connection string | `postgresql://lahzo:lahzo@localhost:5432/lahzo` |
 | `REDIS_URL` | Redis connection string | `redis://localhost:6379` |
 | `JWT_SECRET` | Secret for signing JWT tokens | (any strong random string) |
@@ -119,20 +119,34 @@ Login at `http://localhost:5173` with seeded credentials:
 | `admin@lahzo.dev` | `admin123` | **Admin** |
 | `reviewer@lahzo.dev` | `reviewer123` | Operator |
 
+> **No external credentials needed.** Both accounts are created automatically by the migration at `server/src/db/migrations/002_seed_users.sql` — the file contains the plaintext passwords in comments alongside the bcrypt hashes, so you can read the login emails and passwords directly from there. Migration `003_add_user_roles.sql` then promotes the admin account to the `admin` role.
+>
+> **Note:** Plaintext passwords in migration comments exist solely for reviewer convenience during this assessment. In a production environment, seeded credentials would never be committed to source control — accounts would be provisioned via SSO/SAML or a secure onboarding flow.
+
 Features (all roles):
 - **Dashboard** — contact list with status filter cards, pagination
 - **Contact detail** — full sync history (inbound + outbound events), timestamps, error messages
 - **Re-sync** — retry failed events or re-trigger sync for any contact
 - **Auth guard** — all routes JWT-protected
 
-### Role-Based Access Control (beyond requirements)
+### Beyond Requirements
 
-RBAC was not part of the original task requirements. I implemented it as a production-oriented bonus because any real integration platform needs visibility tiers — operators should see contact status, while admins need raw payload inspection for debugging webhook issues.
+The following features were **not part of the core task requirements** but were implemented as production-oriented decisions. Each is justified below.
 
-**Admin-only features:**
-- **Webhooks Log** — dedicated page listing every raw webhook received, with expandable payload + headers inspection
-- **Payload viewer** — on the contact detail page, admins can expand any sync event to see its full JSON payload
-- **403 enforcement** — admin endpoints return `403 Forbidden` for operator-role users, both backend and frontend guarded
+#### Optional items (from task spec)
+
+- **Docker + docker-compose** — `docker-compose up -d` starts PostgreSQL and Redis with health checks, persistent volumes, and correct networking. `--profile full` adds the server and frontend containers. Ensures zero "works on my machine" issues for the reviewer.
+- **Automated idempotency test** — 3 integration tests verify duplicate webhook re-delivery is handled correctly (first accepted, second skipped, single sync event in DB). 45 unit tests cover the state machine, scoring, signature verification, and field mapping.
+- **Salesforce adapter sketch** — `server/src/adapters/salesforce/adapter.ts` implements the `CrmAdapter` interface with detailed production notes (CDC vs Apex callouts, `__c` custom fields, OAuth JWT Bearer flow). Demonstrates that the core pipeline requires zero changes to support a second CRM.
+- **Structured logging** — pino (Fastify's built-in logger) with JSON output, log levels per environment, and contextual fields on every log line (`syncEventId`, `contactId`, `eventType`). Production-ready for log aggregation (ELK, Datadog).
+
+#### Additional production decisions
+
+- **Role-Based Access Control (RBAC)** — Any real integration platform needs visibility tiers. Operators see contact status and trigger re-syncs; admins inspect raw webhook payloads for debugging. Two roles (`admin`, `operator`) enforced at both backend (`requireAdmin` middleware) and frontend (conditional UI rendering). Admin-only features: webhooks log page, payload viewer on sync events, 403 enforcement.
+- **Global error handler** — Unhandled errors return structured JSON (`{ error, detail }`) instead of raw stack traces. In production mode, `detail` is omitted to prevent information leakage. Without this, a single unhandled throw exposes internal paths and dependency versions.
+- **Input validation** — Query parameters (`page`, `limit`) are clamped to safe ranges (1–100) with fallback defaults. Prevents NaN propagation and unreasonable queries without adding a validation library.
+- **Graceful shutdown** — On `SIGINT`/`SIGTERM`, the server closes the BullMQ worker (finishes in-flight jobs), the Fastify HTTP server (drains connections), the PostgreSQL pool, and the Redis connection. Prevents orphaned connections and data corruption during deploys.
+- **Zod-validated configuration** — Environment variables are validated at startup with Zod schemas. Missing or malformed config fails fast with a clear error message instead of crashing mid-request on an undefined value.
 
 ## API Endpoints
 
@@ -172,7 +186,16 @@ cd server
 npx vitest run tests/unit
 ```
 
-Covers: state machine transitions, HubSpot field mapping, enrichment scoring, webhook signature verification.
+Covers: state machine transitions (24), enrichment scoring (9), webhook signature verification (7), HubSpot field mapping (5).
+
+### Integration tests (3 tests)
+
+```bash
+cd server
+npx vitest run tests/integration
+```
+
+Covers: idempotent webhook re-delivery — verifies that a duplicate webhook payload is accepted once, skipped on re-delivery, and produces exactly one sync event.
 
 ### E2E test (against live HubSpot)
 
@@ -196,14 +219,18 @@ Populates contacts in varied sync statuses with realistic sync history for UI re
 
 1. Create a **developer account** at [developers.hubspot.com](https://developers.hubspot.com)
 2. Create a **test account** inside the developer portal
-3. Create a **private app** (Legacy) with scopes:
+3. Create a **Private App** in the test account with scopes:
    - `crm.objects.contacts.read`
    - `crm.objects.contacts.write`
    - `crm.schemas.contacts.write` (for custom properties)
-4. Create custom properties on the Contact object:
+   - Copy the **access token** → `HUBSPOT_ACCESS_TOKEN` in `.env`
+4. Create a **Legacy App** in the developer account (required for webhook subscriptions — Private Apps don't support webhooks):
+   - Copy the **client secret** → `HUBSPOT_CLIENT_SECRET` in `.env`
+   - Copy the **app ID** → `HUBSPOT_APP_ID` in `.env`
+   - Install the Legacy App into your test account via OAuth
+5. Create custom properties on the Contact object:
    - `lahzo_score` (Number)
    - `lahzo_status` (Single-line text)
-5. Copy the **access token** and **client secret** into your `.env`
 
 ### Exposing local server with ngrok
 
@@ -221,7 +248,7 @@ ngrok will output a public URL like `https://a1b2c3d4.ngrok-free.app`.
 
 ### Configuring HubSpot webhook subscriptions
 
-1. Go to your HubSpot developer account → **Apps** → your private app → **Webhooks**
+1. Go to your HubSpot developer account → **Apps** → your Legacy App → **Webhooks**
 2. Set **Target URL** to: `https://<your-ngrok-url>/webhooks/hubspot`
 3. Create subscriptions:
    - `contact.creation`
@@ -268,6 +295,6 @@ lahzo/
         ├── App.tsx           # Route definitions
         ├── context/          # Auth context
         ├── lib/              # API client
-        ├── pages/            # Login, Dashboard, Contact Detail
+        ├── pages/            # Login, Dashboard, Contact Detail, Webhooks (admin)
         └── components/       # Layout, shared components
 ```

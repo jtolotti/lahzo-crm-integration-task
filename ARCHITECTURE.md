@@ -19,10 +19,10 @@
 | **HTTP Framework** | Fastify | Built-in JSON schema validation on routes (catches malformed payloads at the edge), significantly faster than Express, excellent TypeScript support, and a clean plugin architecture for organizing CRM adapters. |
 | **Database** | PostgreSQL | ACID transactions guarantee that persisting a raw event and enqueuing a job happen atomically (no lost events). Relational integrity for contacts ↔ sync events. JSONB columns give us schema-flexible storage for raw CRM payloads without giving up queryability. |
 | **Queue** | BullMQ (Redis-backed) | Production-grade job queue for Node.js. Built-in retry with configurable exponential backoff, native rate limiting per queue, delayed jobs, dead-letter queue, and job lifecycle events — all requirements from the spec, out of the box. |
-| **Cache / Rate Limiter** | Redis | Already required by BullMQ. We reuse it for fast idempotency checks (SET NX on event IDs) and as a sliding-window token bucket for outbound HubSpot API rate limiting. One dependency serving three roles. |
+| **Cache / Rate Limiter** | Redis | Already required by BullMQ. We reuse it as a sliding-window token bucket for outbound HubSpot API rate limiting. One dependency serving two roles (queue + rate limiter). |
 | **Frontend** | React + Vite | Lightweight SPA. Vite gives instant HMR during development. React lets us compose the contact list → detail → sync history views cleanly. TailwindCSS for minimal but structured styling without a component library overhead. |
 | **Tunneling** | ngrok | Exposes the local webhook endpoint over HTTPS so HubSpot can deliver events during development. |
-| **Containerization** | Docker + docker-compose | Single `docker-compose up` brings up PostgreSQL, Redis, the backend server, and the frontend — reproducible environment, no "works on my machine". |
+| **Containerization** | Docker + docker-compose | `docker-compose up -d` starts PostgreSQL and Redis; `docker-compose --profile full up -d` adds the backend server and frontend — reproducible environment, no "works on my machine". |
 
 **Why not Python/FastAPI?** Both are excellent. TypeScript was chosen because: (a) sharing types between the webhook payload validation, internal models, and the frontend API reduces a class of integration bugs that is central to this assessment; (b) BullMQ is more feature-complete than Celery/RQ for the specific queue semantics required (per-job rate limiting, stale job detection, native backoff curves).
 
@@ -53,8 +53,8 @@
                      │   Redis      │          │   PostgreSQL     │
                      │  (BullMQ     │          │                  │
                      │   queues +   │          │  contacts        │
-                     │   idempot.   │          │  sync_events     │
-                     │   cache)     │          │  raw_webhooks    │
+                     │   rate       │          │  sync_events     │
+                     │   limiter)   │          │  raw_webhooks    │
                      └──────┬───────┘          └──────────────────┘
                             │                          ▲
                             ▼                          │
@@ -77,7 +77,7 @@
                      │  (React SPA)     │
                      │                  │
                      │  GET /api/contacts│
-                     │  GET /api/contacts/:id/history│
+                     │  GET /api/contacts/:id│
                      │  POST /api/contacts/:id/resync│
                      └──────────────────┘
 ```
@@ -85,11 +85,11 @@
 ### Request lifecycle (happy path)
 
 1. HubSpot fires a webhook batch (array of events) to our `/webhooks/hubspot` endpoint.
-2. The handler validates the `X-HubSpot-Signature-v3` header against our client secret.
+2. The handler validates the `X-HubSpot-Signature` header (v2 HMAC-SHA256) against our client secret.
 3. Each event in the batch is inserted into `raw_webhooks` (PostgreSQL) and a job is enqueued to BullMQ — both inside a single database transaction where possible (event persistence is the source of truth; the queue is the delivery mechanism).
 4. The handler returns `200 OK` immediately — well within HubSpot's ~5s timeout.
 5. The **Sync Worker** picks up the job from the queue.
-6. It checks idempotency: has this `eventId` already been processed? (fast lookup in Redis, backed by a UNIQUE constraint in `sync_events`).
+6. It checks idempotency: has this `eventId` already been processed? (status check — if already `synced` or `skipped_stale`, skip immediately).
 7. It checks staleness: is the event's `occurredAt` older than the contact's `last_event_occurred_at`? If yes → mark `skipped_stale`, done.
 8. It upserts the contact in the internal `contacts` table.
 9. It runs simulated enrichment (3–15s delay + trivial score computation).
@@ -127,7 +127,7 @@ The webhook handler and the sync worker are logically separate components connec
 **Queue configuration:**
 - **Concurrency:** Workers process N jobs in parallel (configurable; default ~5 to stay within HubSpot rate limits).
 - **Rate limiting:** BullMQ's built-in `limiter` option: `{ max: 80, duration: 10000 }` — keeps us safely under HubSpot's 100 req/10s ceiling with headroom.
-- **Retry:** Failed jobs retry with exponential backoff: delays of 5s, 15s, 45s, 135s (up to 5 attempts).
+- **Retry:** Failed jobs retry with exponential backoff: delays of 5s, 10s, 20s, 40s, 80s (up to 5 attempts).
 - **Dead-letter:** After max retries, jobs move to a DLQ for operator review.
 
 ---
@@ -136,7 +136,7 @@ The webhook handler and the sync worker are logically separate components connec
 
 **Problem:** HubSpot may deliver the same event multiple times (network retries, our timeout, their internal retries).
 
-**Strategy — two layers:**
+**Strategy — three layers:**
 
 1. **Ingestion-time check:** During webhook ingestion (before enqueuing), we query `sync_events` for an existing `hubspot_event_id`. If found, the event is a known duplicate → skip immediately, never enqueued.
 
@@ -267,7 +267,7 @@ We define a `CrmAdapter` interface that abstracts CRM-specific logic:
 
 ```typescript
 interface CrmAdapter {
-  validateWebhook(request: RawRequest): Promise<boolean>;
+  validateWebhook(request: FastifyRequest): boolean;
   parseEvents(payload: unknown): CrmEvent[];
   fetchContact(contactId: string): Promise<CrmContact>;
   writebackScore(contactId: string, score: number, status: string): Promise<WritebackResult>;
@@ -318,7 +318,7 @@ The **HubSpot adapter** implements this interface, translating between HubSpot's
 | `contact_id` | UUID (FK → contacts) | Which contact this event relates to |
 | `hubspot_event_id` | VARCHAR (UNIQUE, nullable) | Idempotency key for inbound events |
 | `direction` | ENUM(`inbound`, `outbound`) | Webhook receipt vs. API writeback |
-| `event_type` | VARCHAR | `contact.creation`, `contact.propertyChange`, `api_writeback` |
+| `event_type` | VARCHAR | `contact.creation`, `contact.propertyChange`, `score.writeback`, `manual.resync` |
 | `payload` | JSONB | Full raw payload (inbound) or request/response (outbound) |
 | `status` | ENUM(`received`, `processing`, `synced`, `failed`, `skipped_stale`) | Outcome |
 | `error_message` | TEXT | Error details on failure (nullable) |
@@ -393,7 +393,7 @@ Minimal table — just enough for operator authentication and role-based access 
 
 ### Authentication & RBAC
 
-- **JWT tokens** — stateless, short-lived (8h), containing `{ userId, email, role }`. The frontend sends it as `Authorization: Bearer <token>`.
+- **JWT tokens** — stateless, short-lived (8h), containing `{ userId, email, name, role }`. The frontend sends it as `Authorization: Bearer <token>`.
 - **bcrypt** for password hashing — industry standard, 12 salt rounds.
 - **Two middleware layers:** `requireAuth` (verifies JWT, attaches user) and `requireAdmin` (checks `role === 'admin'`).
 - **Two roles:** `admin` (full access including raw webhook inspection) and `operator` (contact management and sync operations).
@@ -414,7 +414,32 @@ Minimal table — just enough for operator authentication and role-based access 
 
 ---
 
-## 14. Production Scale Considerations
+## 14. Beyond Requirements
+
+The following features go beyond the core task specification. Each was a deliberate decision to demonstrate production thinking.
+
+### Optional items (from task spec)
+
+| Feature | Implementation | Rationale |
+|---|---|---|
+| **Docker + docker-compose** | `docker-compose.yml` with PostgreSQL 16 + Redis 7, health checks, persistent volumes. `--profile full` adds server + frontend containers. | Reviewer can start infrastructure with a single command. Eliminates environment inconsistencies. |
+| **Automated tests (48 total)** | 45 unit tests (state machine, scoring, signature, mapping) + 3 integration tests (idempotent re-delivery). | The idempotency test is explicitly called out in the spec as a minimum. Unit tests cover every pure function in the domain layer. |
+| **Salesforce adapter sketch** | `server/src/adapters/salesforce/adapter.ts` — full `CrmAdapter` implementation with production notes on CDC, `__c` fields, OAuth JWT Bearer flow, and daily API limits. | Proves the adapter pattern works: the core pipeline (ingestion → queue → worker → sync events → UI) requires zero changes to support a second CRM. |
+| **Structured logging** | pino (via Fastify) with JSON output, environment-based log levels, contextual fields (`syncEventId`, `contactId`, `eventType`) on every log line. | Production-ready for log aggregation (ELK, Datadog). Enables debugging sync issues across the entire pipeline without adding print statements. |
+
+### Additional production decisions
+
+| Feature | Implementation | Rationale |
+|---|---|---|
+| **RBAC (admin/operator)** | `user_role` enum, `requireAdmin` middleware, role in JWT payload, conditional UI rendering, 403 enforcement. | Any real integration platform needs visibility tiers — operators manage contacts, admins debug raw payloads. Demonstrates security-in-depth beyond basic auth. |
+| **Global error handler** | Fastify `setErrorHandler` returns structured JSON; hides `detail` in production mode. | Without this, an unhandled throw exposes stack traces, internal paths, and dependency versions to the caller. |
+| **Input validation** | `page`/`limit` query params clamped to safe ranges (1–100) with fallback defaults. | Prevents NaN propagation from malformed input and unreasonable queries without adding a validation library. |
+| **Graceful shutdown** | On SIGINT/SIGTERM: close BullMQ worker → Fastify server → PostgreSQL pool → Redis connection. | Prevents orphaned connections, in-flight job corruption, and connection pool exhaustion during deploys. |
+| **Zod-validated config** | All environment variables validated at startup via Zod schemas. | Fail-fast with clear error messages instead of crashing mid-request on an undefined value. Catches misconfiguration before the server accepts traffic. |
+
+---
+
+## 15. Production Scale Considerations
 
 What would change for **multiple clients, multiple CRMs** at production scale:
 
@@ -436,20 +461,17 @@ What would change for **multiple clients, multiple CRMs** at production scale:
 
 ---
 
-## 15. Testing Strategy
+## 16. Testing Strategy
 
 | Level | What we test | Approach |
 |---|---|---|
-| **Unit** | Schema mapping, score computation, stale detection logic, idempotency checks | Pure functions, no I/O. Fast, no dependencies. |
-| **Integration** | Webhook handler → DB persistence → queue enqueue; Worker → DB update → CRM API call | Testcontainers for PostgreSQL and Redis. Mock HubSpot API with `nock` or `msw`. |
-| **Idempotency regression** | Same webhook event delivered twice → only one sync_event with status `synced`, second is skipped | Core spec requirement — explicit test case. |
-| **Stale event regression** | Older event processed after newer one → marked `skipped_stale` | Explicit test case. |
-| **Rate limit handling** | Simulated 429 response → job retried with backoff | Mock HubSpot API returning 429, assert retry count and delay. |
-| **E2E (if time allows)** | Create contact in HubSpot sandbox → verify sync_event appears in operator UI | Manual or Playwright against the running stack. |
+| **Unit (45 tests)** | State machine transitions (24), enrichment scoring (9), signature verification (7), HubSpot field mapping (5) | Pure functions, no I/O. Fast, no dependencies. `npx vitest run tests/unit` |
+| **Integration (3 tests)** | Idempotent re-delivery: same webhook sent twice → first accepted, second skipped, only one sync_event exists | Runs against live server + PostgreSQL + Redis (`npm run dev` must be running). `npx vitest run tests/integration` |
+| **E2E script** | Create real contact in HubSpot → send signed webhook → verify local DB state and HubSpot writeback | `npx tsx scripts/test-e2e-webhook.ts` — requires live HubSpot credentials and running server |
 
 ---
 
-## 16. Project Structure
+## 17. Project Structure
 
 ```
 lahzo/
@@ -485,7 +507,7 @@ lahzo/
 │   │   │   ├── hubspot/
 │   │   │   │   ├── adapter.ts              # HubSpot CrmAdapter implementation
 │   │   │   │   ├── mapper.ts              # Field mapping HubSpot ↔ internal
-│   │   │   │   ├── signature.ts           # Webhook signature verification (v2 + v3)
+│   │   │   │   ├── signature.ts           # Webhook signature verification (v2 used, v3 available)
 │   │   │   │   └── types.ts               # HubSpot-specific type definitions
 │   │   │   └── salesforce/
 │   │   │       └── adapter.ts             # Salesforce adapter stub (extensibility demo)
@@ -511,8 +533,12 @@ lahzo/
 │   │       ├── logger.ts                  # Structured logger (pino)
 │   │       └── rate-limiter.ts            # Sliding-window token bucket (Redis)
 │   ├── scripts/
+│   │   ├── seed.ts                        # Seed demo contacts with varied sync statuses
+│   │   ├── hash-password.ts               # Utility: generate bcrypt hash for user passwords
+│   │   ├── setup-hubspot-properties.ts    # Create lahzo_score + lahzo_status in HubSpot
 │   │   ├── test-webhook.ts                # Send a signed test webhook
-│   │   └── test-e2e-webhook.ts            # E2E: create contact in HubSpot → verify pipeline
+│   │   ├── test-e2e-webhook.ts            # E2E: create contact in HubSpot → verify pipeline
+│   │   └── test-live-webhook.ts           # Test against a live HubSpot contact
 │   └── tests/
 │       ├── unit/
 │       │   ├── enrichment.test.ts          # Scoring logic (9 tests)
@@ -545,7 +571,7 @@ lahzo/
 
 ---
 
-## 17. Sequence Diagram — Full Sync Lifecycle
+## 18. Sequence Diagram — Full Sync Lifecycle
 
 ```
 HubSpot           Webhook Handler        PostgreSQL       Redis/BullMQ       Sync Worker         HubSpot API
@@ -556,8 +582,8 @@ HubSpot           Webhook Handler        PostgreSQL       Redis/BullMQ       Syn
    │                    │── enqueue job ────────────────────▶│                  │                   │
    │◀── 200 OK ────────│                    │                 │                  │                   │
    │                    │                    │                 │── pick up job ──▶│                   │
-   │                    │                    │                 │                  │── SET NX (dedup) ▶│
-   │                    │                    │                 │                  │                   │
+   │                    │                    │                 │                  │── status check ──▶│
+   │                    │                    │                 │                  │   (idempotency)   │
    │                    │                    │◀── check stale ─│                  │                   │
    │                    │                    │── upsert ──────▶│                  │                   │
    │                    │                    │                 │                  │── enrich (3-15s) ─│
