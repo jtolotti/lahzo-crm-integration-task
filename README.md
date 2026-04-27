@@ -55,7 +55,8 @@ Full design details: [ARCHITECTURE.md](./ARCHITECTURE.md)
 git clone <repo-url>
 cd lahzo
 cp .env.example .env
-# Edit .env with your HubSpot credentials
+# Edit .env — see Environment Variables section for all required values
+# (HubSpot credentials, JWT secret, ngrok token, database/Redis URLs)
 ```
 
 ### 2. Start infrastructure
@@ -76,7 +77,16 @@ npm run dev
 
 The server runs migrations automatically on startup, including seeding operator accounts.
 
-### 4. Start the frontend
+### 4. Seed demo data (optional)
+
+```bash
+cd server
+npx tsx scripts/seed.ts
+```
+
+Populates contacts in varied sync statuses (`synced`, `failed`, `processing`, etc.) with realistic sync history, so the dashboard has data to explore immediately.
+
+### 5. Start the frontend
 
 ```bash
 cd client
@@ -86,7 +96,7 @@ npm run dev
 
 Frontend available at `http://localhost:5173` (proxies API calls to the backend).
 
-### 5. Expose webhook endpoint (for live HubSpot events)
+### 6. Expose webhook endpoint (for live HubSpot events)
 
 ```bash
 ngrok http 3000
@@ -102,13 +112,12 @@ Copy the HTTPS URL and configure it as your HubSpot webhook target:
 | `HUBSPOT_ACCESS_TOKEN` | Private app access token (CRM API calls) | `pat-na1-xxxx` |
 | `HUBSPOT_CLIENT_SECRET` | Legacy app client secret (webhook signature verification) | `xxxx-xxxx-xxxx` |
 | `HUBSPOT_PORTAL_ID` | HubSpot portal/account ID | `12345678` |
-| `HUBSPOT_APP_ID` | Legacy app ID (reference for HubSpot webhook config) | `12345678` |
-| `HUBSPOT_CLIENT_ID` | Legacy app client ID (reference for OAuth install) | `xxxx-xxxx-xxxx` |
 | `DATABASE_URL` | PostgreSQL connection string | `postgresql://lahzo:lahzo@localhost:5432/lahzo` |
 | `REDIS_URL` | Redis connection string | `redis://localhost:6379` |
 | `JWT_SECRET` | Secret for signing JWT tokens | (any strong random string) |
 | `PORT` | Server port | `3000` |
 | `NODE_ENV` | Environment | `development` |
+| `NGROK_AUTHTOKEN` | ngrok auth token (for persistent tunnel URLs) | `xxxx` |
 
 ## Operator Dashboard
 
