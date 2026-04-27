@@ -28,8 +28,9 @@ server.addContentTypeParser(
   { parseAs: 'string' },
   (req, body, done) => {
     try {
-      (req as any).rawBody = body;
-      done(null, JSON.parse(body as string));
+      const str = body as string;
+      (req as any).rawBody = str;
+      done(null, str ? JSON.parse(str) : null);
     } catch (err) {
       done(err as Error, undefined);
     }
