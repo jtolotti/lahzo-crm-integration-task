@@ -27,7 +27,7 @@ HubSpot CRM ──webhook──▶ Fastify Server ──persist──▶ Postgre
 - **Stale protection**: Timestamp-based optimistic concurrency + state machine transitions
 - **Rate limiting**: Redis sliding-window limiter (80 req/10s) + BullMQ queue-level limiter
 
-Full design details: [ARCHITECTURE.md](./ARCHITECTURE.md) | Build order: [IMPLEMENTATION_PLAN.md](./IMPLEMENTATION_PLAN.md)
+Full design details: [ARCHITECTURE.md](./ARCHITECTURE.md)
 
 ## Tech Stack
 
@@ -245,7 +245,6 @@ ngrok will output a public URL like `https://a1b2c3d4.ngrok-free.app`.
 ```
 lahzo/
 ├── ARCHITECTURE.md          # System design document
-├── IMPLEMENTATION_PLAN.md   # Detailed build plan
 ├── README.md                # This file
 ├── docker-compose.yml       # PostgreSQL + Redis
 ├── .env.example             # Environment template

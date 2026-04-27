@@ -138,11 +138,13 @@ The webhook handler and the sync worker are logically separate components connec
 
 **Strategy — two layers:**
 
-1. **Fast path (Redis):** Before processing, the worker does `SET eventId NX EX 86400` in Redis. If the key already exists, the event is a duplicate → skip immediately. This is O(1) and avoids hitting the database for repeated deliveries.
+1. **Ingestion-time check:** During webhook ingestion (before enqueuing), we query `sync_events` for an existing `hubspot_event_id`. If found, the event is a known duplicate → skip immediately, never enqueued.
 
-2. **Durable path (PostgreSQL):** The `sync_events` table has a `UNIQUE` constraint on `(hubspot_event_id)`. Even if Redis is flushed, re-processing the same event will fail the insert and be caught gracefully.
+2. **Database constraint (safety net):** The `sync_events` table has a `UNIQUE` constraint on `(hubspot_event_id)`. Even if the application-level check has a race condition (two concurrent webhook deliveries), the database constraint catches it.
 
-**Why two layers:** Redis gives us speed for the hot path (HubSpot often retries within seconds). PostgreSQL gives us correctness even after Redis restarts or evictions.
+3. **Worker-level idempotency:** The worker checks `sync_event.status` before processing. If the event is already `synced` or `skipped_stale`, it returns immediately — safe against BullMQ job retries.
+
+**Why multiple layers:** The ingestion check prevents unnecessary queue work. The UNIQUE constraint guarantees correctness at the database level. The worker status check handles BullMQ retry scenarios. Together they cover all duplicate delivery paths.
 
 ---
 
@@ -209,6 +211,21 @@ AND    sync_status = ANY($allowedFromStatuses)
 The worker checks `rowCount` — if 0, the transition was invalid and the event is handled accordingly (logged, not applied).
 
 **Why both layers:** The timestamp check answers "is this event's **data** newer?" The state machine answers "is this **transition** valid given the contact's current processing stage?" Together they prevent both data regression and status regression.
+
+### 7c. Edge Case Scenario Matrix
+
+| Scenario | Detection Point | Path Taken | Final Status |
+|---|---|---|---|
+| **Duplicate delivery** (same `eventId` sent twice) | Ingestion — `existsByHubspotEventId()` returns true | Second delivery skipped entirely, never enqueued | First event proceeds normally |
+| **Stale event** (older `occurredAt` arrives after newer) | Worker — `occurred_at < last_event_occurred_at` | Marked `skipped_stale`, no enrichment or writeback | `skipped_stale` (terminal) |
+| **CRM rate limit** (HubSpot returns 429) | Worker — `throwCrmError()` detects 429 | `RateLimitError` thrown → BullMQ retries with exponential backoff | Retries up to 5× then `failed` |
+| **CRM transient error** (HubSpot returns 5xx) | Worker — `throwCrmError()` detects 5xx | `TransientCrmError` thrown → same retry path | Retries up to 5× then `failed` |
+| **CRM permanent error** (HubSpot returns 4xx) | Worker — generic error thrown | Job fails, contact marked `failed` with error message | `failed` (operator can retry) |
+| **Invalid webhook signature** | Webhook handler — `validateWebhook()` returns false | 401 returned, payload never persisted or enqueued | Rejected at the edge |
+| **Redis down during ingestion** | `addSyncJob()` fails | Event already persisted in `raw_webhooks` + `sync_events` — recoverable via reconciliation | `received` (stuck until re-enqueued) |
+| **Worker crash mid-processing** | BullMQ detects stalled job | Job automatically retried by BullMQ; worker re-reads from PostgreSQL | Retries from `processing` |
+| **Manual re-sync** (operator clicks button) | `POST /contacts/:id/resync` | New `sync_event` created (no `hubspot_event_id`), enqueued, full pipeline runs | `synced` or `failed` |
+| **Retry failed event** | `POST /sync-events/:id/retry` | Status reset to `received`, re-enqueued, worker retries | `synced` or `failed` |
 
 ---
 
@@ -325,9 +342,10 @@ The **HubSpot adapter** implements this interface, translating between HubSpot's
 | `email` | VARCHAR (UNIQUE) | Login identifier |
 | `password_hash` | VARCHAR | bcrypt-hashed password |
 | `name` | VARCHAR | Display name |
+| `role` | ENUM(`admin`, `operator`) | RBAC role (default: `operator`) |
 | `created_at` | TIMESTAMPTZ | Record creation |
 
-Minimal table — just enough for operator authentication. Seeded with 1–2 accounts at migration time. Passwords stored as bcrypt hashes (never plaintext). In production this would be replaced by SSO/SAML, but having real auth demonstrates the security boundary.
+Minimal table — just enough for operator authentication and role-based access control. Seeded with an admin and operator account at migration time. Passwords stored as bcrypt hashes (never plaintext). In production this would be replaced by SSO/SAML, but having real auth + RBAC demonstrates the security boundary.
 
 **Why four tables:**
 - `raw_webhooks` is our crash-recovery safety net — the immutable record of what HubSpot sent us.
@@ -356,21 +374,30 @@ Minimal table — just enough for operator authentication. Seeded with 1–2 acc
 |---|---|---|
 | `POST` | `/api/auth/login` | Accepts `{ email, password }`, returns `{ token, user }` |
 
-### Operator API (JWT-protected — consumed by the frontend)
+### Operator API (JWT-protected)
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/api/contacts` | List contacts with current sync status (paginated) |
-| `GET` | `/api/contacts/:id` | Get a single contact with summary |
-| `GET` | `/api/contacts/:id/history` | Full sync history for a contact (inbound + outbound events) |
-| `POST` | `/api/contacts/:id/resync` | Manually re-trigger sync for a contact |
-| `GET` | `/api/stats` | Dashboard stats: total contacts, by sync status, recent failures |
+| `GET` | `/api/contacts` | List contacts (paginated, filterable by sync status) |
+| `GET` | `/api/contacts/:id` | Contact detail + full sync event history |
+| `GET` | `/api/contacts/stats/summary` | Status counts for dashboard cards |
+| `POST` | `/api/contacts/:id/resync` | Re-trigger full sync for a contact |
+| `GET` | `/api/sync-events/failures` | Recent failed sync events |
+| `POST` | `/api/sync-events/:id/retry` | Re-queue a failed sync event |
 
-### Authentication approach
+### Admin API (JWT + admin role required)
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/admin/webhooks` | Paginated raw webhook log |
+| `GET` | `/api/admin/webhooks/:id` | Full webhook payload + headers |
+| `GET` | `/api/admin/sync-events/:id/payload` | Sync event payload inspection |
 
-- **JWT tokens** — stateless, no server-side session store needed. The token is short-lived (8h) and contains `{ userId, email }`. The frontend sends it as `Authorization: Bearer <token>`.
+### Authentication & RBAC
+
+- **JWT tokens** — stateless, short-lived (8h), containing `{ userId, email, role }`. The frontend sends it as `Authorization: Bearer <token>`.
 - **bcrypt** for password hashing — industry standard, 12 salt rounds.
-- **Fastify `onRequest` hook** on `/api/*` routes (excluding `/api/auth/login`) verifies the JWT and attaches the user to the request context.
-- **Seeded accounts** — the migration seeds 1–2 operator accounts so the reviewer can log in immediately. Credentials documented in README.
+- **Two middleware layers:** `requireAuth` (verifies JWT, attaches user) and `requireAdmin` (checks `role === 'admin'`).
+- **Two roles:** `admin` (full access including raw webhook inspection) and `operator` (contact management and sync operations).
+- **Seeded accounts** — migrations seed an admin and an operator account so the reviewer can log in immediately. Credentials documented in README.
 
 ---
 
@@ -426,59 +453,94 @@ What would change for **multiple clients, multiple CRMs** at production scale:
 
 ```
 lahzo/
-├── ARCHITECTURE.md
-├── README.md
-├── docker-compose.yml
-├── .env.example
+├── ARCHITECTURE.md                        # This document
+├── README.md                              # Quick start, env vars, API reference
+├── docker-compose.yml                     # PostgreSQL + Redis
+├── .env.example                           # Environment variable template
 ├── server/
 │   ├── package.json
 │   ├── tsconfig.json
 │   ├── src/
-│   │   ├── index.ts                  # Entry point — Fastify server bootstrap
-│   │   ├── config.ts                 # Env-based configuration
+│   │   ├── index.ts                       # Fastify bootstrap, route registration, shutdown
+│   │   ├── config.ts                      # Zod-validated env configuration
+│   │   ├── domain/
+│   │   │   ├── types.ts                   # SyncStatus, EventDirection, UserRole, interfaces
+│   │   │   ├── sync-status.ts             # State machine (transitions + validation)
+│   │   │   └── errors.ts                  # Typed error classes (NotFound, DuplicateEvent, etc.)
 │   │   ├── db/
-│   │   │   ├── client.ts             # PostgreSQL connection (pg or Kysely)
+│   │   │   ├── client.ts                  # PostgreSQL pool (pg)
+│   │   │   ├── migrate.ts                 # Migration runner
 │   │   │   └── migrations/
-│   │   │       └── 001_initial.sql   # Schema creation
+│   │   │       ├── 001_initial.sql         # Schema: contacts, sync_events, raw_webhooks, users
+│   │   │       ├── 002_seed_users.sql      # Seed admin + operator accounts
+│   │   │       └── 003_add_user_roles.sql  # RBAC: user_role enum + role column
+│   │   ├── repositories/
+│   │   │   ├── contact.repository.ts       # Contact CRUD (upsert, find, update score/status)
+│   │   │   ├── sync-event.repository.ts    # Sync event persistence + dedup queries
+│   │   │   ├── raw-webhook.repository.ts   # Raw webhook storage + admin listing
+│   │   │   └── user.repository.ts          # User lookup for auth
 │   │   ├── adapters/
-│   │   │   ├── crm.interface.ts      # CrmAdapter interface
-│   │   │   └── hubspot/
-│   │   │       ├── adapter.ts        # HubSpot CrmAdapter implementation
-│   │   │       ├── mapper.ts         # Field mapping HubSpot ↔ internal
-│   │   │       └── signature.ts      # Webhook signature validation
+│   │   │   ├── crm.interface.ts            # CrmAdapter interface
+│   │   │   ├── crm.factory.ts             # Adapter singleton factory
+│   │   │   ├── hubspot/
+│   │   │   │   ├── adapter.ts              # HubSpot CrmAdapter implementation
+│   │   │   │   ├── mapper.ts              # Field mapping HubSpot ↔ internal
+│   │   │   │   ├── signature.ts           # Webhook signature verification (v2 + v3)
+│   │   │   │   └── types.ts               # HubSpot-specific type definitions
+│   │   │   └── salesforce/
+│   │   │       └── adapter.ts             # Salesforce adapter stub (extensibility demo)
 │   │   ├── queue/
-│   │   │   ├── connection.ts         # Redis/BullMQ connection
-│   │   │   ├── sync.queue.ts         # Queue definition + producers
-│   │   │   └── sync.worker.ts        # Worker: dedup → stale check → enrich → writeback
+│   │   │   ├── connection.ts              # Shared Redis connection for BullMQ
+│   │   │   ├── sync.queue.ts              # Queue definition + job producer
+│   │   │   └── sync.worker.ts             # Worker: picks jobs, delegates to sync.service
 │   │   ├── services/
-│   │   │   ├── contact.service.ts    # Contact CRUD + sync status management
-│   │   │   ├── sync.service.ts       # Sync orchestration logic
-│   │   │   └── enrichment.service.ts # Simulated enrichment + scoring
+│   │   │   ├── ingestion.service.ts        # Webhook ingestion (persist → parse → enqueue)
+│   │   │   ├── sync.service.ts            # 11-step processing pipeline
+│   │   │   ├── enrichment.service.ts      # Simulated enrichment (3-15s delay + scoring)
+│   │   │   ├── contact.service.ts         # Contact business logic + state transitions
+│   │   │   └── auth.service.ts            # Login + JWT signing
 │   │   ├── routes/
-│   │   │   ├── webhook.routes.ts     # POST /webhooks/hubspot
-│   │   │   ├── contact.routes.ts     # GET /api/contacts, GET /api/contacts/:id
-│   │   │   └── sync.routes.ts        # POST /api/contacts/:id/resync
+│   │   │   ├── webhook.routes.ts           # POST /webhooks/hubspot
+│   │   │   ├── auth.routes.ts             # POST /api/auth/login
+│   │   │   ├── contact.routes.ts          # /api/contacts (list, detail, stats, resync)
+│   │   │   ├── sync-event.routes.ts       # /api/sync-events (failures, retry)
+│   │   │   └── admin.routes.ts            # /api/admin/* (raw webhooks, payload inspect)
+│   │   ├── middleware/
+│   │   │   └── auth.middleware.ts          # requireAuth + requireAdmin hooks
 │   │   └── utils/
-│   │       ├── logger.ts             # Structured logger (pino)
-│   │       └── rate-limiter.ts       # Sliding window rate limiter
+│   │       ├── logger.ts                  # Structured logger (pino)
+│   │       └── rate-limiter.ts            # Sliding-window token bucket (Redis)
+│   ├── scripts/
+│   │   ├── test-webhook.ts                # Send a signed test webhook
+│   │   └── test-e2e-webhook.ts            # E2E: create contact in HubSpot → verify pipeline
 │   └── tests/
 │       ├── unit/
+│       │   ├── enrichment.test.ts          # Scoring logic (9 tests)
+│       │   ├── signature.test.ts          # Signature verification (7 tests)
+│       │   ├── mapper.test.ts             # Field mapping (5 tests)
+│       │   └── sync-status.test.ts        # State machine transitions (24 tests)
 │       └── integration/
-└── web/
+│           └── idempotency.test.ts        # Duplicate webhook re-delivery (3 tests)
+└── client/
     ├── package.json
     ├── vite.config.ts
     ├── tsconfig.json
     ├── index.html
     └── src/
-        ├── App.tsx
-        ├── main.tsx
-        ├── api/                      # API client
-        ├── pages/
-        │   ├── ContactList.tsx
-        │   └── ContactDetail.tsx
-        └── components/
-            ├── SyncStatusBadge.tsx
-            └── SyncHistoryTable.tsx
+        ├── App.tsx                        # Router setup (React Router)
+        ├── main.tsx                       # Entry point
+        ├── index.css                      # TailwindCSS imports
+        ├── lib/
+        │   └── api.ts                     # Typed API client + interfaces
+        ├── context/
+        │   └── auth.tsx                   # Auth context (JWT + role management)
+        ├── components/
+        │   └── Layout.tsx                 # Shared layout with nav + role-aware menu
+        └── pages/
+            ├── LoginPage.tsx              # Login form
+            ├── DashboardPage.tsx          # Contact list + status filter cards + pagination
+            ├── ContactDetailPage.tsx      # Contact detail + sync event timeline + resync
+            └── WebhooksPage.tsx           # Raw webhook log (admin only)
 ```
 
 ---
