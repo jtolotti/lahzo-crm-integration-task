@@ -64,13 +64,18 @@
                      │  Sync Worker │                  │
                      │              │                  │
                      │  1. Dedup    │──── writes ──────┘
+                     │    (skip if already processed)
                      │  2. Stale?   │
-                     │  3. Upsert   │
-                     │  4. Enrich   │     ┌─────────────┐
-                     │     (3-15s)  │     │  HubSpot    │
-                     │  5. Score    │────▶│  CRM API    │
-                     │  6. Writeback│     │  PATCH      │
-                     │  7. Log      │     └─────────────┘
+                     │    (skip if older event exists)
+                     │  3. Fetch    │
+                     │    (GET contact from HubSpot)
+                     │  4. Enrich   │
+                     │    (simulate external scoring API)
+                     │  5. Score    │     ┌─────────────┐
+                     │    (compute lahzo_score)  │
+                     │  6. Writeback│────▶│  HubSpot    │
+                     │    (PATCH score + status) │  CRM API    │
+                     │              │     └─────────────┘
                      └──────────────┘
                             │
                             ▼
