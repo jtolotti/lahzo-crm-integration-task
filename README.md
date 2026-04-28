@@ -9,47 +9,60 @@ A production-grade integration service that syncs contacts between a SaaS platfo
 ## Architecture
 
 ```
-┌─────────────┐     webhook (HTTPS via ngrok)     ┌───────────────────┐
-│  HubSpot    │──────────────────────────────────▶│  Fastify Server    │
-│  CRM        │                                   │  /webhooks/hubspot │
-│             │                                   │                    │
-│             │                                   │  1. Validate sig   │
-│             │                                   │  2. Persist raw    │
-│             │                                   │     event (PG)     │
-│             │                                   │  3. Enqueue job    │
-│             │                                   │  4. Return 200     │
-└──────▲──────┘                                   └────────┬──────────┘
-       │                                                   │
-       │                          ┌────────────────────────┤
-       │                          ▼                        ▼
-       │                 ┌──────────────┐         ┌──────────────────┐
-       │                 │   Redis      │         │   PostgreSQL     │
-       │                 │  (BullMQ     │         │                  │
-       │                 │   queues +   │         │  contacts        │
-       │                 │   rate       │         │  sync_events     │
-       │                 │   limiter)   │         │  raw_webhooks    │
-       │                 └──────┬───────┘         └──────────────────┘
-       │                        │                         ▲
-       │                        ▼                         │
-       │                 ┌──────────────┐                 │
-       │                 │  Sync Worker │──── writes ─────┘
-       │                 │              │
-       │  PATCH contact  │  1. Dedup    │
-       │  (OAuth token,  │  2. Stale?   │
-       │   auto-refresh) │  3. Fetch    │
-       │                 │  4. Enrich   │
-       └─────────────────│     (3-15s)  │
-                         │  5. Score    │
-                         │  6. Writeback│
-                         └──────────────┘
-                                │
-                  reads via     │
-                  REST API      ▼
-                         ┌──────────────────┐
-                         │  Operator UI     │
-                         │  (React SPA)     │
-                         │  localhost:5173   │
-                         └──────────────────┘
+┌─────────────┐       webhook (HTTPS via ngrok)
+│  HubSpot    │─────────────────────────────────────────┐
+│  CRM        │                                         │
+└─────────────┘                                         ▼
+                                              ┌───────────────────┐
+                                              │  Fastify Server    │
+                                              │  /webhooks/hubspot │
+                                              │                    │
+                                              │  1. Validate sig   │
+                                              │  2. Persist raw    │
+                                              │     event (PG)     │
+                                              │  3. Enqueue job    │
+                                              │     (BullMQ)       │
+                                              │  4. Return 200     │
+                                              └────────┬──────────┘
+                                                       │
+                              ┌─────────────────────────┤
+                              ▼                         ▼
+                     ┌──────────────┐          ┌──────────────────┐
+                     │   Redis      │          │   PostgreSQL     │
+                     │  (BullMQ     │          │                  │
+                     │   queues +   │          │  contacts        │
+                     │   rate       │          │  sync_events     │
+                     │   limiter)   │          │  raw_webhooks    │
+                     └──────┬───────┘          └──────────────────┘
+                            │                          ▲
+                            ▼                          │
+                     ┌──────────────┐                  │
+                     │  Sync Worker │                  │
+                     │              │                  │
+                     │  1. Dedup    │──── writes ──────┘
+                     │    (skip if already processed)
+                     │  2. Stale?   │
+                     │    (skip if older event exists)
+                     │  3. Fetch    │
+                     │    (GET contact from HubSpot)
+                     │  4. Enrich   │
+                     │    (simulate external scoring API)
+                     │  5. Score    │     ┌─────────────┐
+                     │    (compute lahzo_score)  │
+                     │  6. Writeback│────▶│  HubSpot    │
+                     │    (PATCH score + status) │  CRM API    │
+                     │              │     └─────────────┘
+                     └──────────────┘
+                            │
+                            ▼
+                     ┌──────────────────┐
+                     │  Operator UI     │
+                     │  (React SPA)     │
+                     │                  │
+                     │  GET /api/contacts│
+                     │  GET /api/contacts/:id│
+                     │  POST /api/contacts/:id/resync│
+                     └──────────────────┘
 ```
 
 - **Accept-and-queue**: Webhook handler persists raw event + enqueues job in <100ms, returns 200 within HubSpot's ~5s timeout
