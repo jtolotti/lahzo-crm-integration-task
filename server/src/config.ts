@@ -7,9 +7,10 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
 const envSchema = z.object({
-  // HubSpot
-  HUBSPOT_ACCESS_TOKEN: z.string().min(1),
+  // HubSpot (single Legacy App — OAuth for API access, client secret for webhook signature)
+  HUBSPOT_CLIENT_ID: z.string().min(1),
   HUBSPOT_CLIENT_SECRET: z.string().min(1),
+  HUBSPOT_REDIRECT_URI: z.string().url().default('http://localhost:3000/hubspot/auth/callback'),
   HUBSPOT_PORTAL_ID: z.string().min(1),
 
   // Database

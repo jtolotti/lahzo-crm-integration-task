@@ -5,7 +5,8 @@ import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
-const ACCESS_TOKEN = process.env['HUBSPOT_ACCESS_TOKEN']!;
+import { getScriptAccessToken } from './get-token.js';
+
 const API = 'https://api.hubapi.com';
 
 const properties = [
@@ -28,13 +29,15 @@ const properties = [
 ];
 
 async function main() {
+  const accessToken = await getScriptAccessToken();
+
   for (const prop of properties) {
     console.log(`Creating property: ${prop.name}...`);
 
     const res = await fetch(`${API}/crm/v3/properties/contacts`, {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${ACCESS_TOKEN}`,
+        Authorization: `Bearer ${accessToken}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(prop),

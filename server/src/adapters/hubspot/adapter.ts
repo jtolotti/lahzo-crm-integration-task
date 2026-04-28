@@ -6,6 +6,7 @@ import { verifySignatureV2 } from './signature.js';
 import { waitForToken } from '../../utils/rate-limiter.js';
 import { RateLimitError, TransientCrmError } from '../../domain/errors.js';
 import { logger } from '../../utils/logger.js';
+import { getAccessToken } from './token-manager.js';
 
 const HUBSPOT_API_BASE = 'https://api.hubapi.com';
 
@@ -31,7 +32,7 @@ function throwCrmError(response: Response, body: string): never {
 
 export class HubSpotAdapter implements CrmAdapter {
   constructor(
-    private readonly accessToken: string,
+    private readonly clientId: string,
     private readonly clientSecret: string,
   ) {}
 
@@ -83,9 +84,11 @@ export class HubSpotAdapter implements CrmAdapter {
 
     const url = `${HUBSPOT_API_BASE}/crm/v3/objects/contacts/${contactId}?properties=email,firstname,lastname`;
 
+    const token = await getAccessToken(this.clientId, this.clientSecret);
+
     const response = await fetch(url, {
       headers: {
-        Authorization: `Bearer ${this.accessToken}`,
+        Authorization: `Bearer ${token}`,
         'Content-Type': 'application/json',
       },
     });
@@ -113,10 +116,12 @@ export class HubSpotAdapter implements CrmAdapter {
     const url = `${HUBSPOT_API_BASE}/crm/v3/objects/contacts/${contactId}`;
     const body = toHubSpotProperties(score, status);
 
+    const token = await getAccessToken(this.clientId, this.clientSecret);
+
     const response = await fetch(url, {
       method: 'PATCH',
       headers: {
-        Authorization: `Bearer ${this.accessToken}`,
+        Authorization: `Bearer ${token}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(body),

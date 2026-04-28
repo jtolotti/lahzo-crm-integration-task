@@ -22,3 +22,8 @@ docker-compose.override.yml
 
 # Docx output
 *.docx
+
+# HubSpot OAuth tokens (contains secrets)
+.hubspot-tokens.json
+server/.hubspot-tokens.json
+

@@ -11,6 +11,7 @@ import { authRoutes } from './routes/auth.routes.js';
 import { contactRoutes } from './routes/contact.routes.js';
 import { syncEventRoutes } from './routes/sync-event.routes.js';
 import { adminRoutes } from './routes/admin.routes.js';
+import { hubspotAuthRoutes } from './routes/hubspot-auth.routes.js';
 
 const server = Fastify({
   logger: {
@@ -59,6 +60,7 @@ server.setErrorHandler((error: Error & { statusCode?: number }, _request, reply)
 });
 
 server.register(webhookRoutes);
+server.register(hubspotAuthRoutes);
 server.register(authRoutes, { prefix: '/api' });
 server.register(contactRoutes, { prefix: '/api' });
 server.register(syncEventRoutes, { prefix: '/api' });

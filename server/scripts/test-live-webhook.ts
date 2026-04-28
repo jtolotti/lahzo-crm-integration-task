@@ -18,7 +18,8 @@ import pg from 'pg';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
-const ACCESS_TOKEN = process.env['HUBSPOT_ACCESS_TOKEN']!;
+import { getScriptAccessToken } from './get-token.js';
+
 const DATABASE_URL = process.env['DATABASE_URL'] ?? 'postgresql://lahzo:lahzo@localhost:5432/lahzo';
 const API = 'https://api.hubapi.com';
 
@@ -31,6 +32,7 @@ async function main() {
   console.log('1. Creating contact in HubSpot CRM...');
   console.log(`   Email: ${testEmail}`);
 
+  const ACCESS_TOKEN = await getScriptAccessToken();
   const createRes = await fetch(`${API}/crm/v3/objects/contacts`, {
     method: 'POST',
     headers: {
@@ -82,9 +84,10 @@ async function main() {
       if (contact.sync_status === 'synced') {
         // Verify writeback
         console.log('\n3. Verifying HubSpot writeback...');
+        const currentToken = await getScriptAccessToken();
         const verifyRes = await fetch(
           `${API}/crm/v3/objects/contacts/${created.id}?properties=lahzo_score,lahzo_status`,
-          { headers: { Authorization: `Bearer ${ACCESS_TOKEN}` } },
+          { headers: { Authorization: `Bearer ${currentToken}` } },
         );
         const verifyData = (await verifyRes.json()) as { properties: Record<string, string> };
         console.log(`   lahzo_score in HubSpot: ${verifyData.properties['lahzo_score']}`);

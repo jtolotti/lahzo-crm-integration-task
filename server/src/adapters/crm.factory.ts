@@ -12,7 +12,7 @@ let adapter: CrmAdapter | null = null;
 export function getCrmAdapter(): CrmAdapter {
   if (!adapter) {
     adapter = new HubSpotAdapter(
-      config.HUBSPOT_ACCESS_TOKEN,
+      config.HUBSPOT_CLIENT_ID,
       config.HUBSPOT_CLIENT_SECRET,
     );
   }

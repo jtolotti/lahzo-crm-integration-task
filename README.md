@@ -77,7 +77,17 @@ npm run dev
 
 The server runs migrations automatically on startup, including seeding operator accounts.
 
-### 4. Seed demo data (optional)
+### 4. Authorize HubSpot (one-time OAuth)
+
+Open your browser and visit:
+
+```
+http://localhost:3000/hubspot/auth
+```
+
+This redirects to HubSpot's OAuth page. Authorize the app with your test account. You'll be redirected back with a success message. Tokens are stored locally in `.hubspot-tokens.json` (gitignored) and refresh automatically.
+
+### 5. Seed demo data (optional)
 
 ```bash
 cd server
@@ -86,7 +96,7 @@ npx tsx scripts/seed.ts
 
 Populates contacts in varied sync statuses (`synced`, `failed`, `processing`, etc.) with realistic sync history, so the dashboard has data to explore immediately.
 
-### 5. Start the frontend
+### 6. Start the frontend
 
 ```bash
 cd client
@@ -96,7 +106,7 @@ npm run dev
 
 Frontend available at `http://localhost:5173` (proxies API calls to the backend).
 
-### 6. Expose webhook endpoint (for live HubSpot events)
+### 7. Expose webhook endpoint (for live HubSpot events)
 
 ```bash
 ngrok http 3000
@@ -109,8 +119,9 @@ Copy the HTTPS URL and configure it as your HubSpot webhook target:
 
 | Variable | Description | Example |
 |---|---|---|
-| `HUBSPOT_ACCESS_TOKEN` | Private app access token (CRM API calls) | `pat-na1-xxxx` |
-| `HUBSPOT_CLIENT_SECRET` | Legacy app client secret (webhook signature verification) | `xxxx-xxxx-xxxx` |
+| `HUBSPOT_CLIENT_ID` | Legacy app client ID (OAuth + webhook setup) | `xxxx-xxxx-xxxx` |
+| `HUBSPOT_CLIENT_SECRET` | Legacy app client secret (OAuth + signature verification) | `xxxx-xxxx-xxxx` |
+| `HUBSPOT_REDIRECT_URI` | OAuth callback URL | `http://localhost:3000/hubspot/auth/callback` |
 | `HUBSPOT_PORTAL_ID` | HubSpot portal/account ID | `12345678` |
 | `DATABASE_URL` | PostgreSQL connection string | `postgresql://lahzo:lahzo@localhost:5432/lahzo` |
 | `REDIS_URL` | Redis connection string | `redis://localhost:6379` |
@@ -228,18 +239,17 @@ Populates contacts in varied sync statuses with realistic sync history for UI re
 
 1. Create a **developer account** at [developers.hubspot.com](https://developers.hubspot.com)
 2. Create a **test account** inside the developer portal
-3. Create a **Private App** in the test account with scopes:
-   - `crm.objects.contacts.read`
-   - `crm.objects.contacts.write`
-   - `crm.schemas.contacts.write` (for custom properties)
-   - Copy the **access token** → `HUBSPOT_ACCESS_TOKEN` in `.env`
-4. Create a **Legacy App** in the developer account (required for webhook subscriptions — Private Apps don't support webhooks):
+3. Create a **Legacy App** in the developer account:
+   - Under **Auth**, add scopes: `crm.objects.contacts.read`, `crm.objects.contacts.write`, `crm.schemas.contacts.write`
+   - Set **Redirect URL** to: `http://localhost:3000/hubspot/auth/callback`
+   - Copy the **client ID** → `HUBSPOT_CLIENT_ID` in `.env`
    - Copy the **client secret** → `HUBSPOT_CLIENT_SECRET` in `.env`
-   - Copy the **app ID** → `HUBSPOT_APP_ID` in `.env`
-   - Install the Legacy App into your test account via OAuth
-5. Create custom properties on the Contact object:
-   - `lahzo_score` (Number)
-   - `lahzo_status` (Single-line text)
+4. Start the server (`npm run dev`) and visit `http://localhost:3000/hubspot/auth` to authorize
+5. Create custom properties (automated):
+   ```bash
+   cd server
+   npx tsx scripts/setup-hubspot-properties.ts
+   ```
 
 ### Exposing local server with ngrok
 

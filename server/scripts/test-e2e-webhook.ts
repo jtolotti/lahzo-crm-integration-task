@@ -6,7 +6,8 @@ import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
-const ACCESS_TOKEN = process.env['HUBSPOT_ACCESS_TOKEN']!;
+import { getScriptAccessToken } from './get-token.js';
+
 const CLIENT_SECRET = process.env['HUBSPOT_CLIENT_SECRET']!;
 const PORTAL_ID = parseInt(process.env['HUBSPOT_PORTAL_ID']!, 10);
 const WEBHOOK_URL = 'http://localhost:3000/webhooks/hubspot';
@@ -15,6 +16,7 @@ const HUBSPOT_API = 'https://api.hubapi.com';
 async function main() {
   // Step 1: Fetch an existing contact from HubSpot to use as test subject
   console.log('1. Fetching existing contact from HubSpot...');
+  const ACCESS_TOKEN = await getScriptAccessToken();
   const listRes = await fetch(
     `${HUBSPOT_API}/crm/v3/objects/contacts?limit=1&properties=email,firstname,lastname`,
     { headers: { Authorization: `Bearer ${ACCESS_TOKEN}` } },
