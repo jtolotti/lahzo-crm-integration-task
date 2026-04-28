@@ -9,6 +9,8 @@
 - CRM v3 REST API is well-documented and straightforward for reading/updating contacts with custom properties.
 - Real-world constraints (short webhook timeout, rate limits, eventual delivery) come for free — no simulation needed.
 
+**Dual-app setup (Private App + Legacy App):** HubSpot Private Apps provide a permanent access token for CRM API calls but do not support webhook subscriptions. Legacy Apps support webhooks and provide the client secret for signature verification, but require a full OAuth 2.0 flow (authorization redirect, callback endpoint, token storage, refresh rotation) for API access. Rather than implementing OAuth plumbing that adds no value to the integration architecture being evaluated, we use each app for its strength: **Legacy App for webhook delivery and signature verification**, **Private App for CRM API calls** via its static token. In production, this would consolidate into a single OAuth app with proper token lifecycle management.
+
 ---
 
 ## 2. Technology Stack
