@@ -9,23 +9,56 @@ A production-grade integration service that syncs contacts between a SaaS platfo
 ## Architecture
 
 ```
-HubSpot CRM ──webhook──▶ Fastify Server ──persist──▶ PostgreSQL
-                              │                         ▲
-                              └──enqueue──▶ BullMQ ─────┘
-                                          (Redis)    │
-                                              ▼      │
-                                         Sync Worker ──writeback──▶ HubSpot API
-                                              │
-                                              ▼
-                                         Operator UI (React)
+┌─────────────┐     webhook (HTTPS via ngrok)     ┌───────────────────┐
+│  HubSpot    │──────────────────────────────────▶│  Fastify Server    │
+│  CRM        │                                   │  /webhooks/hubspot │
+│             │                                   │                    │
+│             │                                   │  1. Validate sig   │
+│             │                                   │  2. Persist raw    │
+│             │                                   │     event (PG)     │
+│             │                                   │  3. Enqueue job    │
+│             │                                   │  4. Return 200     │
+└──────▲──────┘                                   └────────┬──────────┘
+       │                                                   │
+       │                          ┌────────────────────────┤
+       │                          ▼                        ▼
+       │                 ┌──────────────┐         ┌──────────────────┐
+       │                 │   Redis      │         │   PostgreSQL     │
+       │                 │  (BullMQ     │         │                  │
+       │                 │   queues +   │         │  contacts        │
+       │                 │   rate       │         │  sync_events     │
+       │                 │   limiter)   │         │  raw_webhooks    │
+       │                 └──────┬───────┘         └──────────────────┘
+       │                        │                         ▲
+       │                        ▼                         │
+       │                 ┌──────────────┐                 │
+       │                 │  Sync Worker │──── writes ─────┘
+       │                 │              │
+       │  PATCH contact  │  1. Dedup    │
+       │  (OAuth token,  │  2. Stale?   │
+       │   auto-refresh) │  3. Fetch    │
+       │                 │  4. Enrich   │
+       └─────────────────│     (3-15s)  │
+                         │  5. Score    │
+                         │  6. Writeback│
+                         └──────────────┘
+                                │
+                  reads via     │
+                  REST API      ▼
+                         ┌──────────────────┐
+                         │  Operator UI     │
+                         │  (React SPA)     │
+                         │  localhost:5173   │
+                         └──────────────────┘
 ```
 
 - **Accept-and-queue**: Webhook handler persists raw event + enqueues job in <100ms, returns 200 within HubSpot's ~5s timeout
-- **Async processing**: BullMQ worker handles enrichment (3–15s), scoring, and CRM writeback
+- **Async processing**: BullMQ worker handles enrichment (3–15s), scoring, and CRM writeback with OAuth tokens (auto-refreshed)
 - **Durability**: Raw webhooks persisted to PostgreSQL before acknowledging — no events lost
 - **Idempotency**: Three-layer dedup (ingestion query + PostgreSQL UNIQUE constraint + worker status check)
 - **Stale protection**: Timestamp-based optimistic concurrency + state machine transitions
 - **Rate limiting**: Redis sliding-window limiter (80 req/10s) + BullMQ queue-level limiter
+- **OAuth**: Single Legacy App with proactive token refresh — zero expired-token failures
 
 Full design details: [ARCHITECTURE.md](./ARCHITECTURE.md)
 
