@@ -97,6 +97,98 @@
 11. It logs the outbound call in `sync_events` (direction: `outbound`, status, response, timestamp).
 12. It updates the contact's `sync_status` to `synced`.
 
+### Event processing flow (with edge cases)
+
+```
+HubSpot webhook POST
+         │
+         ▼
+┌─────────────────────┐
+│ Signature valid?     │──── NO ──▶ 401 Unauthorized
+└─────────┬───────────┘
+          │ YES
+          ▼
+┌─────────────────────┐
+│ Persist raw webhook  │──▶ raw_webhooks table (durability guarantee)
+└─────────┬───────────┘
+          │
+          ▼
+┌─────────────────────┐
+│ For each event:      │
+│ Duplicate eventId?   │──── YES ─▶ Skip (count as duplicate)
+└─────────┬───────────┘
+          │ NO
+          ▼
+┌─────────────────────┐
+│ Upsert contact       │──▶ contacts table (status: received)
+│ Insert sync_event    │──▶ sync_events table (UNIQUE constraint = 2nd dedup layer)
+│ Enqueue BullMQ job   │
+└─────────┬───────────┘
+          │
+          ▼
+  Return 200 OK (<100ms)
+          ·
+          · (async — worker picks up job)
+          ·
+          ▼
+┌─────────────────────┐
+│ Already processed?   │──── YES ─▶ Skip (synced/skipped_stale = 3rd dedup layer)
+│ (status check)       │
+└─────────┬───────────┘
+          │ NO
+          ▼
+┌─────────────────────┐
+│ State transition     │──── INVALID ─▶ InvalidTransitionError (e.g. synced→received)
+│ allowed?             │
+└─────────┬───────────┘
+          │ VALID
+          ▼
+  Contact status → processing
+          │
+          ▼
+┌─────────────────────┐
+│ Stale event?         │──── YES ─▶ Mark skipped_stale, done
+│ occurredAt < contact │
+│ .last_event_at       │
+└─────────┬───────────┘
+          │ NO (fresh)
+          ▼
+┌─────────────────────┐
+│ Fetch contact from   │──── 429 ─▶ RateLimitError → BullMQ retries with backoff
+│ HubSpot CRM API     │──── 5xx ─▶ TransientCrmError → BullMQ retries with backoff
+└─────────┬───────────┘──── 4xx ─▶ Mark failed, log error
+          │ 200 OK
+          ▼
+┌─────────────────────┐
+│ Enrich + Score       │  (3–15s simulated delay)
+│ computeScore()       │  deterministic: email, name, domain, properties
+└─────────┬───────────┘
+          │
+          ▼
+┌─────────────────────┐
+│ Rate limiter check   │──── WAIT ─▶ Sliding window pause until token available
+│ (Redis sorted set)   │
+└─────────┬───────────┘
+          │ TOKEN
+          ▼
+┌─────────────────────┐
+│ Writeback to HubSpot │──── 429 ─▶ RateLimitError → BullMQ retries
+│ PATCH lahzo_score    │──── 5xx ─▶ TransientCrmError → BullMQ retries
+│ PATCH lahzo_status   │
+└─────────┬───────────┘
+          │ 200 OK
+          ▼
+┌─────────────────────┐
+│ Log outbound event   │──▶ sync_events (direction: outbound, type: score.writeback)
+│ Update contact       │──▶ contacts (sync_status: synced, lahzo_score, lahzo_status)
+└─────────────────────┘
+          │
+          ▼
+        DONE ✓
+```
+
+> **Manual re-sync** follows the same worker path starting from the "Already processed?" check, with `event_type: manual.resync`. **Retry** resets a failed event's status to `received` and re-enqueues it, re-entering at the same point.
+
 ---
 
 ## 4. Handling the Short Webhook Timeout
