@@ -47,11 +47,11 @@ A production-grade integration service that syncs contacts between a SaaS platfo
                      │    (GET contact from HubSpot)
                      │  4. Enrich   │
                      │    (simulate external scoring API)
-                     │  5. Score    │     ┌─────────────┐
+                     │  5. Score    │            ┌─────────────┐
                      │    (compute lahzo_score)  │
-                     │  6. Writeback│────▶│  HubSpot    │
+                     │  6. Writeback│──────────▶│  HubSpot    │
                      │    (PATCH score + status) │  CRM API    │
-                     │              │     └─────────────┘
+                     │              │            └─────────────┘
                      └──────────────┘
                             │
                             ▼

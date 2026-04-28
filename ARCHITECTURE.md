@@ -71,11 +71,11 @@
                      │    (GET contact from HubSpot)
                      │  4. Enrich   │
                      │    (simulate external scoring API)
-                     │  5. Score    │     ┌─────────────┐
-                     │    (compute lahzo_score)  │
-                     │  6. Writeback│────▶│  HubSpot    │
+                     │  5. Score    │            ┌─────────────┐
+                     │    (compute lahzo_score)  │             │
+                     │  6. Writeback│──────────▶│  HubSpot    │
                      │    (PATCH score + status) │  CRM API    │
-                     │              │     └─────────────┘
+                     │              │            └─────────────┘
                      └──────────────┘
                             │
                             ▼
